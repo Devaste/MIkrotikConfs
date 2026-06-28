@@ -1,0 +1,178 @@
+# ==========================================================
+# CCR2004 LAB / PROD — CONFIG v1.3.1 (HOTFIX STABLE BASELINE)
+# RouterOS 7.x
+# ==========================================================
+
+# ==========================================================
+# 1. SYSTEM
+# ==========================================================
+/system identity
+set name="CCR2004-LAB-PROD-v1.3.1"
+
+# Disable L2 discovery surface (stealth mode)
+/ip neighbor discovery-settings
+set discover-interface-list=none
+
+/tool mac-server
+set allowed-interface-list=none
+
+/tool mac-server mac-winbox
+set allowed-interface-list=none
+
+# ==========================================================
+# 2. INTERFACE LISTS (LOGICAL ZONES ONLY)
+# ==========================================================
+/interface list
+add name=PROD
+add name=LAB
+
+/interface list member
+add interface=bridge-prod list=PROD
+add interface=bridge-lab list=LAB
+
+# NOTE:
+# MGMT is NOT an interface concept.
+# It is enforced via address-list only.
+
+# ==========================================================
+# 3. BRIDGES (L2 DOMAINS ONLY)
+# ==========================================================
+/interface bridge
+add name=bridge-prod protocol-mode=rstp hw-offload=yes comment="Transparent PROD L2 extension"
+add name=bridge-lab protocol-mode=rstp hw-offload=yes comment="Isolated LAB segment"
+
+# ==========================================================
+# 4. BRIDGE PORTS
+# ==========================================================
+/interface bridge port
+
+# ---------------- PROD ----------------
+add bridge=bridge-prod interface=ether9 hw=yes
+add bridge=bridge-prod interface=ether10 hw=yes
+add bridge=bridge-prod interface=ether11 hw=yes
+add bridge=bridge-prod interface=ether12 hw=yes
+add bridge=bridge-prod interface=ether13 hw=yes
+add bridge=bridge-prod interface=ether14 hw=yes
+add bridge=bridge-prod interface=ether15 hw=yes
+add bridge=bridge-prod interface=ether16 hw=yes
+add bridge=bridge-prod interface=sfp-sfpplus1 hw=yes
+add bridge=bridge-prod interface=sfp-sfpplus2 hw=yes
+
+# ---------------- LAB ----------------
+add bridge=bridge-lab interface=ether1 hw=yes
+add bridge=bridge-lab interface=ether2 hw=yes
+add bridge=bridge-lab interface=ether3 hw=yes
+add bridge=bridge-lab interface=ether4 hw=yes
+add bridge=bridge-lab interface=ether5 hw=yes
+add bridge=bridge-lab interface=ether6 hw=yes
+add bridge=bridge-lab interface=ether7 hw=yes
+add bridge=bridge-lab interface=ether8 hw=yes
+
+# ==========================================================
+# 5. PROD WAN (DHCP CLIENT)
+# ==========================================================
+/ip dhcp-client
+add interface=bridge-prod add-default-route=yes use-peer-dns=no use-peer-ntp=no disabled=no
+
+# ==========================================================
+# 6. LAB L3 CONFIG
+# ==========================================================
+/ip address
+add address=10.10.0.1/24 interface=bridge-lab
+
+# ==========================================================
+# 7. LAB DHCP (STATIC STATEFUL, NO FSM)
+# ==========================================================
+/ip pool
+add name=lab-pool ranges=10.10.0.50-10.10.0.200
+
+/ip dhcp-server
+add name=dhcp-lab interface=bridge-lab address-pool=lab-pool authoritative=after-2sec-delay
+
+/ip dhcp-server network
+add address=10.10.0.0/24 gateway=10.10.0.1 dns-server=10.10.0.1
+
+# ==========================================================
+# 8. DNS (LAB CONTROLLED RESOLVER)
+# ==========================================================
+/ip dns
+set allow-remote-requests=yes servers=1.1.1.1,8.8.8.8 max-udp-packet-size=512
+
+# ==========================================================
+# 9. MGMT ADDRESS LISTS (IDENTITY MODEL)
+# ==========================================================
+/ip firewall address-list
+add list=mgmt-pcs address=192.168.0.95 comment="initial admin host"
+
+# ==========================================================
+# 10. SERVICE HARDENING
+# ==========================================================
+/ip service
+set telnet disabled=yes
+set ftp disabled=yes
+set www disabled=yes
+set api disabled=yes
+set api-ssl disabled=yes
+
+# ==========================================================
+# 11. NAT (LAB → INTERNET via PROD)
+# ==========================================================
+/ip firewall nat
+add chain=srcnat src-address=10.10.0.0/24 out-interface=bridge-prod action=masquerade
+
+# ==========================================================
+# 12. FIREWALL — INPUT (CONTROL PLANE)
+# ==========================================================
+/ip firewall filter
+
+add chain=input action=accept connection-state=established,related comment="EST/REL"
+add chain=input action=drop connection-state=invalid comment="DROP invalid"
+
+# ICMP (MGMT ONLY + PROD boundary)
+add chain=input action=accept src-address-list=mgmt-pcs in-interface=bridge-prod protocol=icmp comment="ICMP mgmt"
+
+# MGMT access (SSH / Winbox)
+add chain=input action=accept src-address-list=mgmt-pcs in-interface=bridge-prod protocol=tcp dst-port=22,8291 comment="MGMT access"
+
+# LAB DNS proxy
+add chain=input action=accept in-interface=bridge-lab protocol=udp dst-port=53 comment="LAB DNS UDP"
+add chain=input action=accept in-interface=bridge-lab protocol=tcp dst-port=53 comment="LAB DNS TCP"
+
+# DROP ALL ELSE
+add chain=input action=drop comment="INPUT default deny"
+
+# ==========================================================
+# 13. FIREWALL — FORWARD (TRAFFIC FLOW MATRIX)
+# ==========================================================
+add chain=forward action=drop connection-state=invalid comment="DROP invalid"
+
+# FASTTRACK (MUST BE FIRST)
+add chain=forward action=fasttrack-connection connection-state=established,related hw-offload=yes comment="FASTTRACK"
+
+# STATEFUL ACCEPT
+add chain=forward action=accept connection-state=established,related comment="EST/REL fallback"
+
+# ----------------------------------------------------------
+# LAB → INTERNET EGRESS (STRICT RFC1918 BLOCK)
+# ----------------------------------------------------------
+add chain=forward action=drop in-interface=bridge-lab dst-address=10.0.0.0/8 comment="LAB block 10/8"
+add chain=forward action=drop in-interface=bridge-lab dst-address=172.16.0.0/12 comment="LAB block 172.16/12"
+add chain=forward action=drop in-interface=bridge-lab dst-address=192.168.0.0/16 comment="LAB block 192.168/16"
+
+add chain=forward action=accept in-interface=bridge-lab out-interface=bridge-prod comment="LAB → INTERNET via NAT"
+
+# ----------------------------------------------------------
+# PROD → LAB (STRICT MGMT ONLY)
+# ----------------------------------------------------------
+add chain=forward action=accept in-interface=bridge-prod out-interface=bridge-lab src-address-list=mgmt-pcs protocol=tcp dst-port=22,3389,8291 comment="PROD MGMT → LAB"
+
+add chain=forward action=drop in-interface=bridge-prod out-interface=bridge-lab comment="BLOCK PROD → LAB"
+
+# ==========================================================
+# 14. DEFAULT DROP
+# ==========================================================
+add chain=forward action=drop comment="DEFAULT DROP (silent)"
+
+# ==========================================================
+# END v1.3.1
+# ==========================================================
