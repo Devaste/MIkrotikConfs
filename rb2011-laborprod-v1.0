@@ -158,10 +158,10 @@ add chain=input action=accept connection-state=established,related comment="EST/
 add chain=input action=drop connection-state=invalid comment="DROP invalid"
 
 # ICMP (MGMT hosts from PROD)
-add chain=input action=accept src-address-list=mgmt-pcs protocol=icmp comment="ICMP mgmt"
+add chain=input action=accept src-address-list=mgmt-pcs in-interface=bridge-prod protocol=icmp comment="ICMP mgmt"
 
 # MGMT access (SSH / Winbox) — from mgmt-pcs via PROD
-add chain=input action=accept src-address-list=mgmt-pcs protocol=tcp dst-port=22,8291 comment="MGMT access"
+add chain=input action=accept src-address-list=mgmt-pcs in-interface=bridge-prod protocol=tcp dst-port=22,8291 comment="MGMT access"
 
 # LAB DNS proxy
 add chain=input action=accept in-interface=bridge-lab protocol=udp dst-port=53 comment="LAB DNS UDP"
