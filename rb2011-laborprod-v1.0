@@ -1,0 +1,222 @@
+# ==========================================================
+# RB2011 LAB/PROD — CONFIG v1.0
+# Ported from CCR2004-16G-2S+ baseline
+# RouterOS 7.x
+# Hardware: RB2011UiAS-2HnD-IN
+# ==========================================================
+#
+# ARCHITECTURE OVERVIEW:
+#   CCR2004 operates as an L2 PROD Extension — all GE ports + SFP+
+#   form a single bridge extending the production network.
+#   The device gets its management IP via DHCP from the upstream
+#   PROD infrastructure. LAB is an isolated island on FE ports.
+#
+# PORT MAP:
+#   ether1-5  -> PROD (Gigabit — L2 extension of PROD net)
+#   SFP       -> PROD (optional fibre uplink)
+#   wlan1     -> PROD (2.4GHz — wireless access to PROD)
+#   ether6-10 -> LAB (FastEthernet — isolated lab segment)
+#
+# DIFFERENCES FROM CCR BASELINE:
+#   - No bridge hw-offload (not supported on RB2011)
+#   - Added WiFi 2.4GHz in PROD segment (built-in radio)
+#   - Fewer ports: 5GE + 5FE + 1SFP vs 16GE + 2SFP+
+#   - Same zone semantics: PROD Extension + isolated LAB
+# ==========================================================
+
+# ==========================================================
+# 1. SYSTEM
+# ==========================================================
+/system identity
+set name="RB2011-LAB-PROD-v1.0"
+
+# Disable L2 discovery surface (stealth mode)
+/ip neighbor discovery-settings
+set discover-interface-list=none
+
+/tool mac-server
+set allowed-interface-list=none
+
+/tool mac-server mac-winbox
+set allowed-interface-list=none
+
+# ==========================================================
+# 2. INTERFACE LISTS (LOGICAL ZONES)
+# ==========================================================
+/interface list
+add name=PROD
+add name=LAB
+
+/interface list member
+add interface=bridge-prod list=PROD
+add interface=bridge-lab list=LAB
+
+# ==========================================================
+# 3. BRIDGES (L2 DOMAINS)
+# ==========================================================
+# NOTE: RB2011 has NO bridge hw-offload — all bridge traffic
+# goes through the CPU. ether1-5 share an AR8327 switch chip
+# but bridge is required for WiFi integration and L3 filtering.
+/interface bridge
+add name=bridge-prod protocol-mode=rstp comment="PROD L2 extension (GE ports + SFP + WiFi)"
+add name=bridge-lab protocol-mode=rstp comment="Isolated LAB segment (FE ports only)"
+
+# ==========================================================
+# 4. BRIDGE PORTS
+# ==========================================================
+/interface bridge port
+
+# ---------------- PROD (Gigabit + WiFi) ----------------
+add bridge=bridge-prod interface=ether1
+add bridge=bridge-prod interface=ether2
+add bridge=bridge-prod interface=ether3
+add bridge=bridge-prod interface=ether4
+add bridge=bridge-prod interface=ether5
+add bridge=bridge-prod interface=sfp1
+add bridge=bridge-prod interface=wlan1
+
+# ---------------- LAB (FastEthernet) ----------------
+add bridge=bridge-lab interface=ether6
+add bridge=bridge-lab interface=ether7
+add bridge=bridge-lab interface=ether8
+add bridge=bridge-lab interface=ether9
+add bridge=bridge-lab interface=ether10
+
+# ==========================================================
+# 5. PROD — DHCP CLIENT (MANAGEMENT IP ONLY)
+# ==========================================================
+/ip dhcp-client
+add interface=bridge-prod add-default-route=yes use-peer-dns=no use-peer-ntp=no disabled=no
+
+# ==========================================================
+# 6. LAB L3 CONFIG
+# ==========================================================
+/ip address
+add address=10.10.0.1/24 interface=bridge-lab
+
+# ==========================================================
+# 7. LAB DHCP (STATIC STATEFUL, NO FSM)
+# ==========================================================
+/ip pool
+add name=lab-pool ranges=10.10.0.50-10.10.0.200
+
+/ip dhcp-server
+add name=dhcp-lab interface=bridge-lab address-pool=lab-pool authoritative=after-2sec-delay
+
+/ip dhcp-server network
+add address=10.10.0.0/24 gateway=10.10.0.1 dns-server=10.10.0.1
+
+# ==========================================================
+# 8. DNS (LAB CONTROLLED RESOLVER)
+# ==========================================================
+/ip dns
+set allow-remote-requests=yes servers=1.1.1.1,8.8.8.8 max-udp-packet-size=512
+
+# ==========================================================
+# 9. MGMT ADDRESS LISTS (IDENTITY MODEL)
+# ==========================================================
+/ip firewall address-list
+add list=mgmt-pcs address=192.168.0.95 comment="initial admin host"
+
+# ==========================================================
+# 10. WIFI 2.4GHz (IN PROD SEGMENT)
+# ==========================================================
+/interface wireless
+set [ find default-name=wlan1 ] ssid=MikroTik-RB2011-Prod \
+    band=2ghz-g/n channel-width=20/40mhz-Ce \
+    country=russia antenna-gain=3 distance=indoor \
+    security-profile=wpa2-prod disabled=no
+
+/interface wireless security-profile
+add name=wpa2-prod mode=dynamic-keys authentication-types=wpa2-psk \
+    unicast-ciphers=aes-ccm group-ciphers=aes-ccm \
+    wpa2-pre-shared-key="CHANGE_ME_STRONG_PASSWORD"
+
+# ==========================================================
+# 11. SERVICE HARDENING
+# ==========================================================
+/ip service
+set telnet disabled=yes
+set ftp disabled=yes
+set www disabled=yes
+set api disabled=yes
+set api-ssl disabled=yes
+# SSH (22) and Winbox (8291) remain — restricted via firewall
+
+# ==========================================================
+# 12. NAT (LAB → INTERNET via PROD)
+# ==========================================================
+/ip firewall nat
+add chain=srcnat src-address=10.10.0.0/24 out-interface=bridge-prod action=masquerade
+
+# ==========================================================
+# 13. FIREWALL — INPUT (CONTROL PLANE)
+# ==========================================================
+/ip firewall filter
+
+add chain=input action=accept connection-state=established,related comment="EST/REL"
+add chain=input action=drop connection-state=invalid comment="DROP invalid"
+
+# ICMP (MGMT hosts from PROD)
+add chain=input action=accept src-address-list=mgmt-pcs protocol=icmp comment="ICMP mgmt"
+
+# MGMT access (SSH / Winbox) — from mgmt-pcs via PROD
+add chain=input action=accept src-address-list=mgmt-pcs protocol=tcp dst-port=22,8291 comment="MGMT access"
+
+# LAB DNS proxy
+add chain=input action=accept in-interface=bridge-lab protocol=udp dst-port=53 comment="LAB DNS UDP"
+add chain=input action=accept in-interface=bridge-lab protocol=tcp dst-port=53 comment="LAB DNS TCP"
+
+# LAB DHCP
+add chain=input action=accept in-interface=bridge-lab protocol=udp dst-port=67,68 comment="LAB DHCP"
+
+# DROP ALL ELSE
+add chain=input action=drop comment="INPUT default deny"
+
+# ==========================================================
+# 14. FIREWALL — FORWARD (TRAFFIC FLOW MATRIX)
+# ==========================================================
+add chain=forward action=drop connection-state=invalid comment="DROP invalid"
+
+# FASTTRACK (MUST BE FIRST)
+add chain=forward action=fasttrack-connection connection-state=established,related comment="FASTTRACK"
+
+# STATEFUL ACCEPT
+add chain=forward action=accept connection-state=established,related comment="EST/REL fallback"
+
+# ----------------------------------------------------------
+# LAB → INTERNET EGRESS (STRICT RFC1918 BLOCK)
+# ----------------------------------------------------------
+add chain=forward action=drop in-interface=bridge-lab dst-address=10.0.0.0/8 comment="LAB block 10/8"
+add chain=forward action=drop in-interface=bridge-lab dst-address=172.16.0.0/12 comment="LAB block 172.16/12"
+add chain=forward action=drop in-interface=bridge-lab dst-address=192.168.0.0/16 comment="LAB block 192.168/16"
+
+add chain=forward action=accept in-interface=bridge-lab out-interface=bridge-prod comment="LAB → INTERNET via NAT"
+
+# ----------------------------------------------------------
+# PROD → LAB (STRICT MGMT ONLY)
+# ----------------------------------------------------------
+add chain=forward action=accept in-interface=bridge-prod out-interface=bridge-lab \
+    src-address-list=mgmt-pcs protocol=tcp dst-port=22,3389,8291 \
+    comment="PROD MGMT → LAB"
+
+add chain=forward action=drop in-interface=bridge-prod out-interface=bridge-lab \
+    comment="BLOCK PROD → LAB (except mgmt)"
+
+# ==========================================================
+# 15. DEFAULT DROP
+# ==========================================================
+add chain=forward action=drop comment="DEFAULT DROP (silent)"
+
+# ==========================================================
+# 16. WIFI HARDENING
+# ==========================================================
+/interface wireless wps
+set wps-mode=disabled
+
+/interface wireless
+set [ find default-name=wlan1 ] hide-ssid=no
+
+# ==========================================================
+# END v1.0
+# ==========================================================
